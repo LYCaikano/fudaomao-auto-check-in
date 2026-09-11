@@ -1,0 +1,11 @@
+# 账号与持久化数据（含密码/令牌/会话，绝不入库）
+config.json
+session.json
+cookies.txt
+
+# 签到照片（个人照片）
+pic/*
+!pic/.gitkeep
+
+__pycache__/
+*.pyc
