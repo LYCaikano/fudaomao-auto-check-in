@@ -287,7 +287,7 @@ class FdmClient:
             raise AuthError("会话失效（非 JSON 响应）")
         datas = obj.get("datas")
         # 会话脱钩金丝雀：服务端返回 code=0 空壳 {"WEC-HASLOGIN":false,...}
-        if isinstance(datas, dict) and str(datas.get("WEC-HASLOGIN")) == "false":
+        if isinstance(datas, dict) and str(datas.get("WEC-HASLOGIN")).lower() == "false":
             raise AuthError("会话失效（空壳响应）")
         if str(obj.get("code")) != "0":
             msg = obj.get("message") or "操作失败"
