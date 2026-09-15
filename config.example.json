@@ -1,4 +1,5 @@
 {
   "username": "校园卡号",
-  "password": "密码"
+  "password": "密码",
+  "jitter_max_seconds": 0
 }

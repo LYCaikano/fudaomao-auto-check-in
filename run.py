@@ -3,7 +3,8 @@
 
 用法：python3 run.py
 
-- 账号配置在 config.json（username/password = 校园卡号/密码）
+- 账号配置在 config.json（username/password = 校园卡号/密码；
+  jitter_max_seconds = 非交互运行时的随机延迟上限，默认 0）
 - pic/ 文件夹放一张或多张签到照片（jpg/png），拍照签到任务随机选一张提交
 - 定位：取任务签到范围内（地理围栏）随机一点提交
 - 登录逻辑复刻自兰大 App 本体源码（loginV2 AES + 短信二次认证），
@@ -375,8 +376,35 @@ def random_point_in_fence(fence: dict):
     return round(lng + dlng, 6), round(lat + dlat, 6)
 
 
+def disturb_photo(img):
+    """照片自然化扰动：几何微缩放 + 光度抖动 + 亮度自适应高斯噪声。
+    让每次上传的照片像一次独立的重拍/转存（打散 pHash/JPEG 网格对齐，
+    噪声暗部小亮部大，接近真实传感器），防照片级查重比对。"""
+    import numpy as np
+    from PIL import Image
+
+    # 1. 几何微变换：0.96~1.0 随机缩放，Lanczos 重采样
+    w, h = img.size
+    scale = 0.96 + random.random() * 0.04
+    img = img.resize((max(32, int(w * scale)), max(32, int(h * scale))), Image.LANCZOS)
+
+    # 2. 光度抖动：gamma 0.95~1.05，亮度 ±3
+    gamma = 0.95 + random.random() * 0.10
+    bright = random.randint(-3, 3)
+    lut = [max(0, min(255, int(255 * (i / 255.0) ** gamma + bright))) for i in range(256)]
+    img = img.point(lut * 3)
+
+    # 3. 亮度自适应高斯噪声：σ = σ0 + k·√(L/255)，读取噪声 + 散粒噪声模型
+    a = np.asarray(img, dtype=np.float64)
+    lum = 0.299 * a[..., 0] + 0.587 * a[..., 1] + 0.114 * a[..., 2]
+    sigma = (0.6 + random.random() * 0.8) + (0.6 + random.random() * 0.9) * np.sqrt(lum / 255.0 + 0.01)
+    common = np.random.normal(0.0, sigma)  # 跨通道相关分量（模拟去马赛克相关性）
+    noise = common[..., None] + np.random.normal(0.0, (sigma * 0.3)[..., None])
+    return Image.fromarray(np.clip(a + noise, 0, 255).astype(np.uint8))
+
+
 def pick_photo() -> bytes:
-    """pic/ 下随机选一张；有 PIL 则重编码为 JPEG（与 App 行为一致，兼去 EXIF）"""
+    """pic/ 下随机选一张；有 PIL 则扰动+重编码为 JPEG（兼去 EXIF），无则原样上传"""
     files = [os.path.join(PIC_DIR, f) for f in os.listdir(PIC_DIR)
              if f.lower().endswith(PIC_EXTS)] if os.path.isdir(PIC_DIR) else []
     if not files:
@@ -388,8 +416,12 @@ def pick_photo() -> bytes:
         from PIL import Image
         img = Image.open(path).convert("RGB")
         img.thumbnail((1600, 1600))
+        try:
+            img = disturb_photo(img)
+        except ImportError:
+            pass  # 无 numpy 时跳过低层扰动，仅重编码
         buf = io.BytesIO()
-        img.save(buf, "JPEG", quality=88)
+        img.save(buf, "JPEG", quality=random.randint(72, 92))
         return buf.getvalue()
     except ImportError:
         with open(path, "rb") as f:
@@ -478,9 +510,21 @@ def ensure_session(fdm: FdmClient, store: SessionStore, username: str, password:
     fdm.login_chain(store)
 
 
+def maybe_jitter(max_seconds):
+    """定时任务随机延迟（0~max_seconds 秒），模拟真人操作；
+    max_seconds<=0 或手动运行（tty）时跳过。上限由 config.json 的
+    jitter_max_seconds 控制，默认 0（不延迟）"""
+    if max_seconds <= 0 or sys.stdin.isatty():
+        return
+    delay = random.randint(0, max_seconds)
+    log("随机延迟 %d 秒后开始签到" % delay)
+    time.sleep(delay)
+
+
 def main():
     random.seed()
     cfg = load_config()
+    maybe_jitter(int(cfg.get("jitter_max_seconds") or 0))
     store = SessionStore()
     fdm = FdmClient()
 
