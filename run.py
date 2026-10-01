@@ -403,10 +403,14 @@ def disturb_photo(img):
     return Image.fromarray(np.clip(a + noise, 0, 255).astype(np.uint8))
 
 
+def pic_files():
+    return [os.path.join(PIC_DIR, f) for f in os.listdir(PIC_DIR)
+            if f.lower().endswith(PIC_EXTS)] if os.path.isdir(PIC_DIR) else []
+
+
 def pick_photo() -> bytes:
     """pic/ 下随机选一张；有 PIL 则扰动+重编码为 JPEG（兼去 EXIF），无则原样上传"""
-    files = [os.path.join(PIC_DIR, f) for f in os.listdir(PIC_DIR)
-             if f.lower().endswith(PIC_EXTS)] if os.path.isdir(PIC_DIR) else []
+    files = pic_files()
     if not files:
         raise ApiError("pic 文件夹中没有图片，请放入签到照片后重跑")
     path = random.choice(files)
@@ -479,6 +483,9 @@ def do_sign(fdm: FdmClient, task: dict):
     fence = random.choice(fences)
     lng, lat = random_point_in_fence(fence)
     is_photo = str(detail.get("isPhoto", "0")) == "1"
+    if is_photo and not pic_files():
+        log("「%s」需要拍照签到，请将照片放入 pic/ 文件夹后重跑，跳过" % name)
+        return
     photo_url = fdm.upload_photo(pick_photo()) if is_photo else ""
     try:
         fdm.submit_sign(wid, lng, lat, photo_url, fence["address"])
@@ -527,11 +534,6 @@ def main():
     maybe_jitter(int(cfg.get("jitter_max_seconds") or 0))
     store = SessionStore()
     fdm = FdmClient()
-
-    pics = [f for f in os.listdir(PIC_DIR) if f.lower().endswith(PIC_EXTS)] \
-        if os.path.isdir(PIC_DIR) else []
-    if not pics:
-        log("提示: pic 文件夹为空，拍照签到任务需要放入至少一张照片")
 
     ensure_session(fdm, store, cfg["username"], cfg["password"])
 
