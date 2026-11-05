@@ -59,6 +59,14 @@ class ApiError(Exception):
     """业务/网络错误"""
 
 
+class NetworkError(ApiError):
+    """网络层错误（连接/超时），可自动重试"""
+
+
+class ManualActionRequired(ApiError):
+    """需要人工介入（如短信验证码），自动重试无意义"""
+
+
 # ---------- AES（AES/CBC/NoPadding，零填充，hex 小写） ----------
 
 def aes_encrypt_hex(plain: str) -> str:
@@ -132,8 +140,12 @@ def _http(req: urllib.request.Request, timeout=15) -> str:
     try:
         with urllib.request.urlopen(req, context=CTX, timeout=timeout) as r:
             return r.read().decode("utf-8", "replace")
-    except urllib.error.URLError as e:
-        raise ApiError("网络错误: %s" % e)
+    except urllib.error.HTTPError as e:
+        if e.code >= 500:
+            raise NetworkError("网络错误: HTTP %d" % e.code)
+        raise ApiError("HTTP %d" % e.code)
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        raise NetworkError("网络错误: %s" % e)
 
 
 def gateway_login(username: str, password: str, store: SessionStore):
@@ -160,7 +172,7 @@ def gateway_login(username: str, password: str, store: SessionStore):
         try:
             captcha = input("请输入短信验证码: ").strip()
         except (EOFError, KeyboardInterrupt):
-            raise ApiError("未输入验证码，已取消登录")
+            raise ManualActionRequired("未输入验证码，已取消登录")
         vr = _gateway_form("/eusp-unify-terminal/app-user/verifyPhoneCaptcha",
                            {"deviceId": store.device_id, "sessionId": sid,
                             "appOs": "1", "captcha": captcha})
@@ -244,6 +256,8 @@ class FdmClient:
                 return r.status, r.headers.get("Location")
         except urllib.error.HTTPError as e:
             return e.code, e.headers.get("Location")
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            raise NetworkError("网络错误: %s" % e)
 
     def login_chain(self, store: SessionStore):
         """入口页 302 链 -> 网关 getSt 换 ST -> loginSuccess 落 MOD_AUTH_CAS"""
@@ -528,16 +542,14 @@ def maybe_jitter(max_seconds):
     time.sleep(delay)
 
 
-def main():
-    random.seed()
-    cfg = load_config()
-    maybe_jitter(int(cfg.get("jitter_max_seconds") or 0))
+def run_once(cfg):
+    """执行一轮完整签到；任何任务失败会抛出，交给外层重试"""
     store = SessionStore()
     fdm = FdmClient()
 
     ensure_session(fdm, store, cfg["username"], cfg["password"])
 
-    # 读操作网络抖动重试；签到提交不重试防重复
+    # 读操作网络抖动重试；签到提交不原地重试（由外层整轮重试，先查已签避免重复）
     datas = None
     for attempt in range(3):
         try:
@@ -552,6 +564,8 @@ def main():
                 raise
             log("查询任务失败（%s），重试中" % e)
             time.sleep(1)
+    else:
+        raise AuthError("查询任务连续 3 次会话失效")
 
     tasks = signable_tasks(datas or {})
     if not tasks:
@@ -559,20 +573,50 @@ def main():
         log("当前没有可签到的任务（今日已签 %d 项；任务未到时段或已结束）" % signed)
         return
     log("发现 %d 项可签到任务" % len(tasks))
+    failed = []
     for t in tasks:
+        name = t.get("taskName", "?")
         try:
             do_sign(fdm, t)
         except AuthError:
             log("签到时会话失效，重建会话后重试一次")
             fdm.clear_session()
-            ensure_session(fdm, store, cfg["username"], cfg["password"])
             try:
+                ensure_session(fdm, store, cfg["username"], cfg["password"])
                 do_sign(fdm, t)
             except (AuthError, ApiError) as e:
-                log("「%s」签到失败: %s" % (t.get("taskName", "?"), e))
+                log("「%s」签到失败: %s" % (name, e))
+                failed.append(name)
         except ApiError as e:
-            log("「%s」签到失败: %s" % (t.get("taskName", "?"), e))
+            log("「%s」签到失败: %s" % (name, e))
+            failed.append(name)
     fdm.save_cookies()
+    if failed:
+        raise ApiError("「%s」签到失败" % "」「".join(failed))
+
+
+def main():
+    random.seed()
+    cfg = load_config()
+    maybe_jitter(int(cfg.get("jitter_max_seconds") or 0))
+
+    attempts = 3
+    last = None
+    for i in range(1, attempts + 1):
+        try:
+            run_once(cfg)
+            return
+        except ManualActionRequired:
+            raise
+        except (AuthError, ApiError, OSError) as e:
+            err = NetworkError("网络错误: %s" % e) if isinstance(e, OSError) else e
+            last = err
+            if i >= attempts:
+                break
+            wait = 5 * i
+            log("第 %d/%d 次执行失败（%s），%d 秒后重试" % (i, attempts, err, wait))
+            time.sleep(wait)
+    raise last
 
 
 if __name__ == "__main__":
