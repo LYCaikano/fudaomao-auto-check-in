@@ -5,7 +5,8 @@
 
 - 账号配置在 config.json（username/password = 校园卡号/密码；
   jitter_max_seconds = 非交互运行时的随机延迟上限，默认 0）
-- pic/ 文件夹放一张或多张签到照片（jpg/png），拍照签到任务随机选一张提交
+- pic/ 文件夹放一张或多张签到照片（jpg/png），拍照签到任务按 config.json 的
+  photo_mode 选一张提交（random 随机 / rotate 每天轮换 / fixed 固定，默认 random）
 - 定位：取任务签到范围内（地理围栏）随机一点提交
 - 登录逻辑复刻自兰大 App 本体源码（loginV2 AES + 短信二次认证），
   login_token/gateway_token 持久化在 session.json，fdm 会话 Cookie 持久化在
@@ -45,6 +46,10 @@ AES_KEY = b"QSfg26hg433BV42a"
 CTX = ssl.create_default_context()
 
 PIC_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
+
+# 照片选择模式:random=随机(默认)/ rotate=按文件名顺序每天轮换 / fixed=固定一张
+PHOTO_MODE = "random"
+PHOTO_FIXED_NAME = ""
 
 
 def log(msg):
@@ -95,6 +100,9 @@ def load_config() -> dict:
         cfg = json.load(f)
     if not cfg.get("username") or not cfg.get("password"):
         sys.exit("config.json 中 username/password 为空，请填写校园卡号和密码")
+    global PHOTO_MODE, PHOTO_FIXED_NAME
+    PHOTO_MODE = str(cfg.get("photo_mode") or "random").lower()
+    PHOTO_FIXED_NAME = str(cfg.get("photo_fixed_name") or "")
     return cfg
 
 
@@ -423,12 +431,20 @@ def pic_files():
 
 
 def pick_photo() -> bytes:
-    """pic/ 下随机选一张；有 PIL 则扰动+重编码为 JPEG（兼去 EXIF），无则原样上传"""
-    files = pic_files()
+    """pic/ 下按 photo_mode 选一张；有 PIL 则扰动+重编码为 JPEG（兼去 EXIF），无则原样上传
+    random=随机（默认）/ rotate=按文件名顺序每天轮换（同一天固定同一张）/ fixed=固定一张"""
+    files = sorted(pic_files())
     if not files:
         raise ApiError("pic 文件夹中没有图片，请放入签到照片后重跑")
-    path = random.choice(files)
-    log("随机选择照片: %s" % os.path.basename(path))
+    if PHOTO_MODE == "rotate":
+        path = files[int(time.strftime("%Y%m%d")) % len(files)]
+        log("轮换选择照片: %s (%s)" % (os.path.basename(path), time.strftime("%Y-%m-%d")))
+    elif PHOTO_MODE == "fixed" and PHOTO_FIXED_NAME and             os.path.exists(os.path.join(PIC_DIR, PHOTO_FIXED_NAME)):
+        path = os.path.join(PIC_DIR, PHOTO_FIXED_NAME)
+        log("固定选择照片: %s" % os.path.basename(path))
+    else:
+        path = random.choice(files)
+        log("随机选择照片: %s" % os.path.basename(path))
     try:
         import io
         from PIL import Image
