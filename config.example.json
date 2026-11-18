@@ -1,5 +1,7 @@
 {
   "username": "校园卡号",
   "password": "密码",
-  "jitter_max_seconds": 0
+  "jitter_max_seconds": 0,
+  "photo_mode": "random",
+  "photo_fixed_name": ""
 }
